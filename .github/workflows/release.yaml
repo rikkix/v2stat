@@ -34,7 +34,7 @@ jobs:
           GOARCH: ${{ matrix.arch }}
 
       - name: Upload artifact for ${{ matrix.arch }}
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: v2stat-${{ matrix.arch }}
           path: v2stat-${{ matrix.arch }}
@@ -59,7 +59,7 @@ jobs:
           prerelease: false
 
       - name: Download build artifacts
-        uses: actions/download-artifact@v3
+        uses: actions/download-artifact@v4
         with:
           path: artifacts
 
