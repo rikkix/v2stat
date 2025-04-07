@@ -1,0 +1,84 @@
+name: Build & Release Go App (CGO Enabled)
+
+on:
+  push:
+    branches: [ main ]
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm  # use the label provided by GitHub for native arm64
+    runs-on: ${{ matrix.runner }}
+    env:
+      GOOS: linux
+      CGO_ENABLED: 1
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+
+      - name: Build binary for ${{ matrix.arch }}
+        run: |
+          echo "Building for GOARCH=${{ matrix.arch }}"
+          go build -v -o v2stat-${{ matrix.arch }} .
+        env:
+          GOARCH: ${{ matrix.arch }}
+
+      - name: Upload artifact for ${{ matrix.arch }}
+        uses: actions/upload-artifact@v3
+        with:
+          name: v2stat-${{ matrix.arch }}
+          path: v2stat-${{ matrix.arch }}
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Create Release
+        id: create_release
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: v0.0.0-dev${{ github.run_number }}
+          release_name: Release v0.0.0-dev${{ github.run_number }}
+          draft: false
+          prerelease: false
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v3
+        with:
+          path: artifacts
+
+      - name: Upload amd64 binary to release
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: artifacts/v2stat-amd64
+          asset_name: v2stat-amd64
+          asset_content_type: application/octet-stream
+
+      - name: Upload arm64 binary to release
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: artifacts/v2stat-arm64
+          asset_name: v2stat-arm64
+          asset_content_type: application/octet-stream
