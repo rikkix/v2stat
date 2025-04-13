@@ -40,7 +40,7 @@ func main() {
     logger.SetLevel(level)
 
     // Dial gRPC server
-    conn, err := grpc.Dial(*flagServer, grpc.WithInsecure())
+    conn, err := grpc.NewClient(*flagServer, grpc.WithInsecure())
     if err != nil {
         logger.Fatalf("Failed to dial gRPC server: %v", err)
     }
