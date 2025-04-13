@@ -16,6 +16,7 @@ import (
 )
 
 var (
+    flagInterval = flag.Int("interval", 300, "Interval in seconds to record stats")
     flagDatabase = flag.String("db", "v2stat.db", "Path to SQLite database")
     flagServer   = flag.String("server", "127.0.0.1:8080", "V2Ray API server address")
     flagLogLevel = flag.String("log-level", "info", "Log level (debug, info, warn, error, fatal, panic)")
@@ -79,24 +80,7 @@ func main() {
         logger.Errorf("Failed to query stats: %v", err)
     }
 
-    // Wait until the top of the next hour
-    now := time.Now()
-	if now.Minute() != 0 || now.Second() != 0 {
-		nextHour := now.Truncate(time.Hour).Add(time.Hour)
-		subDuration := nextHour.Sub(now)
-		logger.Infof("Waiting for %s to start recording stats", subDuration)
-	
-		timer := time.NewTimer(subDuration)
-		select {
-		case <-timer.C:
-		case <-sigCh:
-			logger.Info("Received shutdown signal, exiting.")
-			return
-		}
-	}
-
-    // Start a ticker for every hour
-    ticker := time.NewTicker(1 * time.Hour)
+    ticker := time.NewTicker(time.Duration(*flagInterval) * time.Second)
     defer ticker.Stop()
     // Main loop
     for {
