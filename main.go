@@ -1,104 +1,207 @@
 package main
 
 import (
-    "context"
-    "database/sql"
-    "flag"
-    "os"
-    "os/signal"
-    "time"
+	"context"
+	"database/sql"
+	"flag"
+	"fmt"
+	"os"
+	"os/signal"
+	"syscall"
+	"time"
 
-    _ "github.com/mattn/go-sqlite3"
-    "github.com/sirupsen/logrus"
-    "google.golang.org/grpc"
+	"github.com/jedib0t/go-pretty/table"
+	"github.com/jedib0t/go-pretty/text"
+	_ "github.com/mattn/go-sqlite3"
+	"github.com/sirupsen/logrus"
+	"google.golang.org/grpc"
 
-    "go.rikki.moe/v2stat/command"
+	"go.rikki.moe/v2stat/command"
 )
 
 var (
-    flagInterval = flag.Int("interval", 300, "Interval in seconds to record stats")
-    flagDatabase = flag.String("db", "v2stat.db", "Path to SQLite database")
-    flagServer   = flag.String("server", "127.0.0.1:8080", "V2Ray API server address")
-    flagLogLevel = flag.String("log-level", "info", "Log level (debug, info, warn, error, fatal, panic)")
+	flagInterval = flag.Int("interval", 300, "Interval in seconds to record stats")
+	flagDatabase = flag.String("db", "", "Path to SQLite database")
+	flagServer   = flag.String("server", "127.0.0.1:8080", "V2Ray API server address")
+	flagLogLevel = flag.String("log-level", "info", "Log level (debug, info, warn, error, fatal, panic)")
 )
 
-// V2Stat holds references to the logger, database connection, and gRPC client.
+var DefaultDBPaths = []string{
+	"v2stat.db",
+	"traffic.db",
+	"/var/lib/v2stat/traffic.db",
+	"/usr/local/share/v2stat/traffic.db",
+	"/opt/apps/v2stat/traffic.db",
+}
+
 type V2Stat struct {
-    logger *logrus.Logger
-    db     *sql.DB
-    stat   command.StatsServiceClient
+	logger *logrus.Logger
+	db     *sql.DB
+	stat   command.StatsServiceClient
 }
 
 func main() {
-    flag.Parse()
+	flag.Parse()
+	args := flag.Args()
 
-    // Initialize logger
-    level, err := logrus.ParseLevel(*flagLogLevel)
-    if err != nil {
-        logrus.Fatalf("Invalid log level: %v", err)
-    }
-    logger := logrus.New()
-    logger.SetLevel(level)
+	if len(args) < 1 {
+		fmt.Println("Usage: v2stat <command> [args]")
+		fmt.Println("Available commands: daemon, query")
+		os.Exit(1)
+	}
 
-    // Dial gRPC server
-    conn, err := grpc.NewClient(*flagServer, grpc.WithInsecure())
-    if err != nil {
-        logger.Fatalf("Failed to dial gRPC server: %v", err)
-    }
-    defer conn.Close()
+	logger := setupLogger(*flagLogLevel)
+	db := setupDatabase(logger, *flagDatabase)
+	defer db.Close()
 
-    statClient := command.NewStatsServiceClient(conn)
+	v2stat := &V2Stat{
+		logger: logger,
+		db:     db,
+	}
 
-    // Open SQLite database
-    db, err := sql.Open("sqlite3", *flagDatabase)
-    if err != nil {
-        logger.Fatalf("Failed to open database: %v", err)
-    }
-    defer db.Close()
+	switch args[0] {
+	case "daemon":
+		conn, err := grpc.NewClient(*flagServer, grpc.WithInsecure())
+		if err != nil {
+			logger.Fatalf("Failed to dial gRPC server: %v", err)
+		}
+		defer conn.Close()
+		v2stat.stat = command.NewStatsServiceClient(conn)
+		runServer(v2stat)
 
-    // Create main struct
-    v2stat := &V2Stat{
-        logger: logger,
-        db:     db,
-        stat:   statClient,
-    }
+	case "query":
+		handleQuery(v2stat, args[1:])
 
-    // Initialize database schema
-    if err := v2stat.InitDB(); err != nil {
-        logger.Fatalf("Failed to initialize database: %v", err)
-    }
+	default:
+		fmt.Println("Unknown command:", args[0])
+		fmt.Println("Available commands: daemon, query")
+		os.Exit(1)
+	}
+}
 
-    // For graceful shutdown, create a context that cancels on SIGINT/SIGTERM
-    ctx, cancel := context.WithCancel(context.Background())
-    defer cancel()
+func setupLogger(levelStr string) *logrus.Logger {
+	level, err := logrus.ParseLevel(levelStr)
+	if err != nil {
+		logrus.Fatalf("Invalid log level: %v", err)
+	}
+	logger := logrus.New()
+	logger.SetLevel(level)
+	return logger
+}
 
-    sigCh := make(chan os.Signal, 1)
-    signal.Notify(sigCh, os.Interrupt, os.Kill)
+func setupDatabase(logger *logrus.Logger, dbpath string) *sql.DB {
+	if dbpath == "" {
+		for _, path := range DefaultDBPaths {
+			if _, err := os.Stat(path); err == nil {
+				dbpath = path
+				break
+			}
+		}
+		if dbpath == "" {
+			logger.Fatal("No database path provided and no default database found.")
+		}
+	}
+	logger.Infof("Using database: %s", dbpath)
 
-    // Optional: Query stats once with a reset (as in your original code)
-    if _, err := v2stat.stat.QueryStats(ctx, &command.QueryStatsRequest{Reset_: true}); err != nil {
-        logger.Errorf("Failed to query stats: %v", err)
-    }
+	db, err := sql.Open("sqlite3", dbpath)
+	if err != nil {
+		logger.Fatalf("Failed to open database: %v", err)
+	}
+	return db
+}
 
-    ticker := time.NewTicker(time.Duration(*flagInterval) * time.Second)
-    defer ticker.Stop()
-    // Main loop
-    for {
-        logger.Info("Recording stats...")
-        if err := v2stat.RecordNow(ctx); err != nil {
-            logger.Errorf("Failed to record stats: %v", err)
-        }
+func runServer(v2stat *V2Stat) {
+	logger := v2stat.logger
 
-        // Wait for next ticker or shutdown signal
-        select {
-        case <-ticker.C:
-            // just continue the loop and record again
-        case <-sigCh:
-            logger.Info("Received shutdown signal, exiting.")
-            return
-        case <-ctx.Done():
-            logger.Info("Context canceled, exiting.")
-            return
-        }
-    }
+	if err := v2stat.InitDB(); err != nil {
+		logger.Fatalf("Failed to initialize database: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	defer signal.Stop(sigCh)
+
+	ticker := time.NewTicker(time.Duration(*flagInterval) * time.Second)
+	defer ticker.Stop()
+
+	for {
+		logger.Info("Recording stats...")
+		if err := v2stat.RecordNow(ctx); err != nil {
+			logger.Errorf("Failed to record stats: %v", err)
+		}
+
+		select {
+		case <-ticker.C:
+			continue
+		case <-sigCh:
+			logger.Info("Received shutdown signal, exiting.")
+			return
+		case <-ctx.Done():
+			logger.Info("Context canceled, exiting.")
+			return
+		}
+	}
+}
+
+func handleQuery(v2stat *V2Stat, args []string) {
+	if len(args) == 0 {
+		fmt.Println("Usage: v2stat query <connection_name>")
+		fmt.Println("Available connections:")
+		conns, err := v2stat.QueryConn()
+		if err != nil {
+			v2stat.logger.Fatalf("Failed to query connection: %v", err)
+		}
+		for _, c := range conns {
+			fmt.Printf("\t%s\n", c.String())
+		}
+		return
+	}
+
+	connStr := args[0]
+	conn, ok := ParseConnInfo(connStr)
+	if !ok {
+		v2stat.logger.Fatalf("Invalid connection format: %s", connStr)
+	}
+
+	stats, err := v2stat.QueryStatsHourly(&conn)
+	if err != nil {
+		v2stat.logger.Fatalf("Failed to query stats: %v", err)
+	}
+
+	printStatsTable(stats)
+}
+
+func printStatsTable(stats []TrafficStat) {
+	tb := table.NewWriter()
+	tb.SetOutputMirror(os.Stdout)
+	tb.AppendHeader(table.Row{"Time", "Downlink", "Uplink"})
+
+	var totalDown, totalUp int64
+
+	for _, stat := range stats {
+		totalDown += stat.Downlink
+		totalUp += stat.Uplink
+		tb.AppendRow(table.Row{stat.Time, sizeToHuman(stat.Downlink), sizeToHuman(stat.Uplink)})
+	}
+
+	tb.AppendFooter(table.Row{"Total", sizeToHuman(totalDown), sizeToHuman(totalUp)})
+	style := table.StyleLight
+	style.Format.Footer = text.FormatDefault
+	tb.SetStyle(style)
+	tb.Render()
+}
+
+func sizeToHuman(size int64) string {
+	units := []string{"B", "KiB", "MiB", "GiB", "TiB"}
+	value := float64(size)
+	for _, unit := range units {
+		if value < 1024 {
+			return fmt.Sprintf("%7.2f %s", value, unit)
+		}
+		value /= 1024
+	}
+	return fmt.Sprintf("%7.2f %s", value, "PiB")
 }
