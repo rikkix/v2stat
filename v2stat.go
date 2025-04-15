@@ -1,72 +1,47 @@
-package main
+package v2stat
 
 import (
 	"context"
+	"database/sql"
 	"strings"
 	"time"
 
+	"github.com/sirupsen/logrus"
 	"go.rikki.moe/v2stat/command"
+	"google.golang.org/grpc"
 )
 
-type TrafficDirection int
-
-const (
-	DirectionDownlink TrafficDirection = iota
-	DirectionUplink
-)
-
-type ConnectionType int
-
-const (
-	ConnTypeUser ConnectionType = iota
-	ConnTypeInbound
-	ConnTypeOutbound
-)
-
-type ConnInfo struct {
-	Type ConnectionType `json:"type"`
-	Name string         `json:"name"`
+type V2Stat struct {
+	logger *logrus.Logger
+	db     *sql.DB
+	conn *grpc.ClientConn
+	stat   command.StatsServiceClient
 }
 
-type TrafficStat struct {
-	Time     string `json:"time"`
-	Downlink int64  `json:"downlink"`
-	Uplink   int64  `json:"uplink"`
-}
-
-func (ci *ConnInfo) String() string {
-	switch ci.Type {
-	case ConnTypeUser:
-		return "user:" + ci.Name
-	case ConnTypeInbound:
-		return "inbound:" + ci.Name
-	case ConnTypeOutbound:
-		return "outbound:" + ci.Name
-	default:
-		return "unknown:" + ci.Name
+func NewV2Stat(logger *logrus.Logger, db *sql.DB, conn *grpc.ClientConn) *V2Stat {
+	return &V2Stat{
+		logger: logger,
+		db:     db,
+		conn:   conn,
+		stat:   command.NewStatsServiceClient(conn),
 	}
 }
 
-func ParseConnInfo(s string) (ConnInfo, bool) {
-	parts := strings.Split(s, ":")
-	if len(parts) != 2 {
-		return ConnInfo{}, false
+func (v *V2Stat) Close() {
+	if v.db != nil {
+		v.db.Close()
 	}
-	var connType ConnectionType
-	switch parts[0] {
-	case "user":
-		connType = ConnTypeUser
-	case "inbound":
-		connType = ConnTypeInbound
-	case "outbound":
-		connType = ConnTypeOutbound
-	default:
-		return ConnInfo{}, false
+	if v.conn != nil {
+		v.conn.Close()
 	}
-	return ConnInfo{
-		Type: connType,
-		Name: parts[1],
-	}, true
+}
+
+func (v *V2Stat) SetConn(conn *grpc.ClientConn) {
+	if v.conn != nil {
+		v.conn.Close()
+	}
+	v.conn = conn
+	v.stat = command.NewStatsServiceClient(conn)
 }
 
 
@@ -255,3 +230,5 @@ func (v *V2Stat) QueryStatsHourly(conn *ConnInfo) ([]TrafficStat, error) {
 	}
 	return stats, nil		
 }
+
+

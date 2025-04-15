@@ -1,14 +1,10 @@
 package main
 
 import (
-	"context"
 	"database/sql"
 	"flag"
 	"fmt"
 	"os"
-	"os/signal"
-	"syscall"
-	"time"
 
 	"github.com/jedib0t/go-pretty/table"
 	"github.com/jedib0t/go-pretty/text"
@@ -16,7 +12,7 @@ import (
 	"github.com/sirupsen/logrus"
 	"google.golang.org/grpc"
 
-	"go.rikki.moe/v2stat/command"
+	"go.rikki.moe/v2stat"
 )
 
 var (
@@ -34,11 +30,7 @@ var DefaultDBPaths = []string{
 	"/opt/apps/v2stat/traffic.db",
 }
 
-type V2Stat struct {
-	logger *logrus.Logger
-	db     *sql.DB
-	stat   command.StatsServiceClient
-}
+var logger *logrus.Logger
 
 func main() {
 	flag.Parse()
@@ -50,14 +42,11 @@ func main() {
 		os.Exit(1)
 	}
 
-	logger := setupLogger(*flagLogLevel)
+	logger = setupLogger(*flagLogLevel)
 	db := setupDatabase(logger, *flagDatabase)
-	defer db.Close()
 
-	v2stat := &V2Stat{
-		logger: logger,
-		db:     db,
-	}
+	v2s := v2stat.NewV2Stat(logger, db, nil)
+	defer v2s.Close()
 
 	switch args[0] {
 	case "daemon":
@@ -65,12 +54,11 @@ func main() {
 		if err != nil {
 			logger.Fatalf("Failed to dial gRPC server: %v", err)
 		}
-		defer conn.Close()
-		v2stat.stat = command.NewStatsServiceClient(conn)
-		runServer(v2stat)
+		v2s.SetConn(conn)
+		runDaemon(v2s)
 
 	case "query":
-		handleQuery(v2stat, args[1:])
+		handleQuery(v2s, args[1:])
 
 	default:
 		fmt.Println("Unknown command:", args[0])
@@ -110,49 +98,13 @@ func setupDatabase(logger *logrus.Logger, dbpath string) *sql.DB {
 	return db
 }
 
-func runServer(v2stat *V2Stat) {
-	logger := v2stat.logger
-
-	if err := v2stat.InitDB(); err != nil {
-		logger.Fatalf("Failed to initialize database: %v", err)
-	}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-	defer signal.Stop(sigCh)
-
-	ticker := time.NewTicker(time.Duration(*flagInterval) * time.Second)
-	defer ticker.Stop()
-
-	for {
-		logger.Info("Recording stats...")
-		if err := v2stat.RecordNow(ctx); err != nil {
-			logger.Errorf("Failed to record stats: %v", err)
-		}
-
-		select {
-		case <-ticker.C:
-			continue
-		case <-sigCh:
-			logger.Info("Received shutdown signal, exiting.")
-			return
-		case <-ctx.Done():
-			logger.Info("Context canceled, exiting.")
-			return
-		}
-	}
-}
-
-func handleQuery(v2stat *V2Stat, args []string) {
+func handleQuery(v2s *v2stat.V2Stat, args []string) {
 	if len(args) == 0 {
 		fmt.Println("Usage: v2stat query <connection_name>")
 		fmt.Println("Available connections:")
-		conns, err := v2stat.QueryConn()
+		conns, err := v2s.QueryConn()
 		if err != nil {
-			v2stat.logger.Fatalf("Failed to query connection: %v", err)
+			logger.Fatalf("Failed to query connection: %v", err)
 		}
 		for _, c := range conns {
 			fmt.Printf("\t%s\n", c.String())
@@ -161,20 +113,20 @@ func handleQuery(v2stat *V2Stat, args []string) {
 	}
 
 	connStr := args[0]
-	conn, ok := ParseConnInfo(connStr)
+	conn, ok := v2stat.ParseConnInfo(connStr)
 	if !ok {
-		v2stat.logger.Fatalf("Invalid connection format: %s", connStr)
+		logger.Fatalf("Invalid connection format: %s", connStr)
 	}
 
-	stats, err := v2stat.QueryStatsHourly(&conn)
+	stats, err := v2s.QueryStatsHourly(&conn)
 	if err != nil {
-		v2stat.logger.Fatalf("Failed to query stats: %v", err)
+		logger.Fatalf("Failed to query stats: %v", err)
 	}
 
 	printStatsTable(stats)
 }
 
-func printStatsTable(stats []TrafficStat) {
+func printStatsTable(stats []v2stat.TrafficStat) {
 	tb := table.NewWriter()
 	tb.SetOutputMirror(os.Stdout)
 	tb.AppendHeader(table.Row{"Time", "Downlink", "Uplink"})
